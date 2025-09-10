@@ -166,13 +166,13 @@ class Dobot:
         msg.id = CommunicationProtocolIDs.SET_GET_END_EFFECTOR_GRIPPER
         msg.ctrl = ControlValues.THREE
         msg.params = bytearray([])
-        if suction_state == Suction.OPEN:
+        if suction_state == Suction.SUCK:
             msg.params.extend(bytearray([0x01]))
             msg.params.extend(bytearray([0x00]))
-        elif suction_state == Suction.CLOSE:
+        elif suction_state == Suction.RELEASE:
             msg.params.extend(bytearray([0x01]))
             msg.params.extend(bytearray([0x01]))
-        elif suction_state == Suction.DISABLE:
+        elif suction_state == Suction.OFF:
             msg.params.extend(bytearray([0x00]))
             msg.params.extend(bytearray([0x00]))
         else:
