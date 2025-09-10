@@ -4,6 +4,7 @@ import time
 import threading
 import warnings
 
+from .enums.suction import Suction
 from .message import Message
 from .enums import PTPMode
 from .enums.CommunicationProtocolIDs import CommunicationProtocolIDs
@@ -145,7 +146,7 @@ class Dobot:
         return self._send_command(msg)
 
     """
-        Sets the status of the suction cup
+        Sets the status of the suction cup (OLD)
     """
     def _set_end_effector_suction_cup(self, enable=False):
         msg = Message()
@@ -157,6 +158,28 @@ class Dobot:
             msg.params.extend(bytearray([0x01]))
         else:
             msg.params.extend(bytearray([0x00]))
+        return self._send_command(msg)
+
+
+    def _set_end_effector_suction_cup_new(self, suction_state: Suction):
+        msg = Message()
+        msg.id = CommunicationProtocolIDs.SET_GET_END_EFFECTOR_GRIPPER
+        msg.ctrl = ControlValues.THREE
+        msg.params = bytearray([])
+        if suction_state == Suction.OPEN:
+            msg.params.extend(bytearray([0x01]))
+            msg.params.extend(bytearray([0x00]))
+        elif suction_state == Suction.CLOSE:
+            msg.params.extend(bytearray([0x01]))
+            msg.params.extend(bytearray([0x01]))
+        elif suction_state == Suction.DISABLE:
+            msg.params.extend(bytearray([0x00]))
+            msg.params.extend(bytearray([0x00]))
+        else:
+            print("Unknown Gripper State")
+            print("0: Open")
+            print("1: Close")
+            print("2: Dissable")
         return self._send_command(msg)
 
     """
@@ -306,8 +329,8 @@ class Dobot:
     def move_to(self, x, y, z, r, wait=False):
         self._set_ptp_cmd(x, y, z, r, mode=PTPMode.MOVL_XYZ, wait=wait)
 
-    def suck(self, enable):
-        self._set_end_effector_suction_cup(enable)
+    def suck(self, suction_state: Suction):
+        self._set_end_effector_suction_cup_new(suction_state)
 
     def grip(self, enable):
         self._set_end_effector_gripper(enable)
