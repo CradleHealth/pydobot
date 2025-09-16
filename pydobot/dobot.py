@@ -79,16 +79,26 @@ class Dobot:
                 print('pydobot: !! timeout reading checksum')
             return None
         checksum = chk_b[0]
-        # 5) Verify checksum. Accept common firmware variants.
-        chk_body_only   = (sum(body)) & 0xFF
-        chk_with_len    = (length + sum(body)) & 0xFF
-        if checksum != chk_body_only and checksum != chk_with_len:
+        # 5) Verify checksum. Support additive and LRC (two's complement) styles, with/without LEN.
+        sum_body      = (sum(body)) & 0xFF
+        sum_len_body  = (length + sum(body)) & 0xFF
+        valid = (
+            checksum == sum_body or
+            checksum == sum_len_body or
+            ((sum_body + checksum) & 0xFF) == 0x00 or
+            ((sum_len_body + checksum) & 0xFF) == 0x00
+        )
+        if not valid:
             if self.verbose:
                 full = self._SYNC + bytes([length]) + body + bytes([checksum])
                 def hx(b): return ' '.join(f'{x:02X}' for x in b)
+                calc_lrc_body     = ((-sum_body) & 0xFF)
+                calc_lrc_lenbody  = ((-sum_len_body) & 0xFF)
                 print('pydobot: !! checksum mismatch')
                 print('         raw:', hx(full))
-                print(f'         len={length} id=0x{cmd_id:02X} ctrl=0x{ctrl:02X} calc_body=0x{chk_body_only:02X} calc_len=0x{chk_with_len:02X} got=0x{checksum:02X}')
+                print(f'         len={length} id=0x{cmd_id:02X} ctrl=0x{ctrl:02X} '
+                      f'sum_body=0x{sum_body:02X} sum_len_body=0x{sum_len_body:02X} '
+                      f'lrc_body=0x{calc_lrc_body:02X} lrc_lenbody=0x{calc_lrc_lenbody:02X} got=0x{checksum:02X}')
             return None
         return self._SYNC + bytes([length]) + body + bytes([checksum])
 
