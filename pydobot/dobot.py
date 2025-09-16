@@ -225,6 +225,33 @@ class Dobot:
         finally:
             self.verbose = prev_verbose
 
+    def _query_current_index(self, overall_timeout=0.6):
+        """
+        Poll the current queued index using the standard locked send/read path.
+        Returns an int index or None on timeout.
+        """
+        msg = Message()
+        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
+        msg.ctrl = ControlValues.ZERO  # immediate GET
+
+        prev_verbose = getattr(self, 'verbose', False)
+        try:
+            self.verbose = False
+            # Manually inline a shortened _send_command with lock, to keep per-iteration latency low.
+            self.lock.acquire()
+            self._send_message(msg)
+            resp = self._read_message(overall_timeout=overall_timeout)
+            self.lock.release()
+        finally:
+            self.verbose = prev_verbose
+
+        if resp is None or resp.id != CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
+            return None
+        try:
+            return struct.unpack_from('<I', resp.params, 0)[0]
+        except Exception:
+            return None
+
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
         before_idx = None
@@ -281,7 +308,7 @@ class Dobot:
         last_seen = None
         kick_sent = False
         while time.monotonic() < exec_deadline:
-            current_idx = self._safe_get_current_index(overall_timeout=0.6)
+            current_idx = self._query_current_index(overall_timeout=0.6)
             if current_idx is None:
                 if self.verbose:
                     print('pydobot: exec wait — no index reply this cycle')
