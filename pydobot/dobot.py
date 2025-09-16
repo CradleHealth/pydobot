@@ -28,7 +28,7 @@ class Dobot:
             buf += chunk
         return bytes(buf)
 
-    def _read_frame_raw(self, overall_timeout=0.5):
+    def _read_frame_raw(self, overall_timeout=1.0):
         """
         Read one Dobot frame and return the raw bytes (including header and checksum),
         or None on timeout/invalid frame.
@@ -66,7 +66,7 @@ class Dobot:
         payload, checksum = rest[:-1], rest[-1]
 
         # 4) Verify checksum
-        total = (sum(self._SYNC) + sum(hdr) + sum(payload)) & 0xFF
+        total = (sum(hdr) + sum(payload)) & 0xFF
         if total != checksum:
             return None
 
@@ -137,7 +137,7 @@ class Dobot:
         return response
 
     def _read_message(self):
-        raw = self._read_frame_raw(overall_timeout=0.5)
+        raw = self._read_frame_raw(overall_timeout=1.0)
         if raw is None:
             return
         msg = Message(raw)
