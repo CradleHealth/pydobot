@@ -54,33 +54,43 @@ class Dobot:
                 print('pydobot: !! timeout waiting for frame header (0xAA 0xAA)')
             return None  # header not found
 
-        # 2) Read LEN, ID, CTRL
-        hdr = self._read_exactly(3, deadline)
-        if hdr is None:
+        # 2) Read LEN
+        len_b = self._read_exactly(1, deadline)
+        if len_b is None:
             return None
-        length, cmd_id, ctrl = hdr[0], hdr[1], hdr[2]
-
-        # 3) Read payload + checksum (length bytes)
-        rest = self._read_exactly(length, deadline)
-        if rest is None or len(rest) < 1:
-            return None
-
-        payload, checksum = rest[:-1], rest[-1]
-
-        # 4) Verify checksum. Some firmware variants compute checksum without LEN.
-        chk_with_len = (sum(hdr) + sum(payload)) & 0xFF
-        chk_wo_len   = ((hdr[1] + hdr[2] + sum(payload)) & 0xFF)  # ID + CTRL + payload only
-        if checksum != chk_with_len and checksum != chk_wo_len:
+        length = len_b[0]
+        if length < 2:
             if self.verbose:
-                full = self._SYNC + hdr + payload + bytes([checksum])
+                print(f'pydobot: !! invalid length {length} (must be >= 2 for ID+CTRL)')
+            return None
+        # 3) Read BODY (ID + CTRL + PAYLOAD)
+        body = self._read_exactly(length, deadline)
+        if body is None or len(body) != length:
+            if self.verbose:
+                print('pydobot: !! timeout/short read on body')
+            return None
+        cmd_id = body[0]
+        ctrl   = body[1]
+        payload = body[2:] if length > 2 else b''
+        # 4) Read checksum
+        chk_b = self._read_exactly(1, deadline)
+        if chk_b is None:
+            if self.verbose:
+                print('pydobot: !! timeout reading checksum')
+            return None
+        checksum = chk_b[0]
+        # 5) Verify checksum. Accept common firmware variants.
+        chk_body_only   = (sum(body)) & 0xFF
+        chk_with_len    = (length + sum(body)) & 0xFF
+        if checksum != chk_body_only and checksum != chk_with_len:
+            if self.verbose:
+                full = self._SYNC + bytes([length]) + body + bytes([checksum])
                 def hx(b): return ' '.join(f'{x:02X}' for x in b)
                 print('pydobot: !! checksum mismatch')
                 print('         raw:', hx(full))
-                print(f'         len={hdr[0]} id=0x{hdr[1]:02X} ctrl=0x{hdr[2]:02X} calc_len=0x{chk_with_len:02X} calc_no_len=0x{chk_wo_len:02X} got=0x{checksum:02X}')
+                print(f'         len={length} id=0x{cmd_id:02X} ctrl=0x{ctrl:02X} calc_body=0x{chk_body_only:02X} calc_len=0x{chk_with_len:02X} got=0x{checksum:02X}')
             return None
-
-        # 5) Return raw frame
-        return self._SYNC + hdr + rest
+        return self._SYNC + bytes([length]) + body + bytes([checksum])
 
     def __init__(self, port, verbose=False):
         threading.Thread.__init__(self)
