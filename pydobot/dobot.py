@@ -140,11 +140,16 @@ class Dobot:
     """
     def _get_queued_cmd_current_index(self):
         # Use an immediate GET without going through _send_command to avoid lock re-entrancy
-        msg = Message()
-        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-        msg.ctrl = ControlValues.ZERO  # immediate GET, not queued
-        self._send_message(msg)
-        resp = self._read_message(overall_timeout=2.0)
+        prev_verbose = getattr(self, 'verbose', False)
+        try:
+            self.verbose = False  # suppress noisy prints during tight polling
+            msg = Message()
+            msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
+            msg.ctrl = ControlValues.ZERO  # immediate GET, not queued
+            self._send_message(msg)
+            resp = self._read_message(overall_timeout=2.0)
+        finally:
+            self.verbose = prev_verbose
         if resp is None or resp.id != CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
             return None
         idx = struct.unpack_from('<I', resp.params, 0)[0]
@@ -266,7 +271,7 @@ class Dobot:
 
         # Wait for execution with tiny debounce and clear logging
         exec_deadline = time.monotonic() + 30.0  # hard cap to avoid indefinite hangs
-        seen_ge = 0  # require two consecutive reads > expected
+        seen_eq = 0  # consecutive reads equal to expected (for 'last executed' semantics)
         while time.monotonic() < exec_deadline:
             current_idx = self._get_queued_cmd_current_index()
             if current_idx is None:
@@ -274,16 +279,20 @@ class Dobot:
                 continue
             if self.verbose:
                 print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
-            # Some firmware reports 'current index' as the command being executed.
-            # Treat completion as the index advancing *past* the expected command.
+            # Case 1: firmware reports 'currently executing' -> completion when index advances past expected
             if current_idx > expected_idx:
-                seen_ge += 1
-                if seen_ge >= 2:
+                if self.verbose:
+                    print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
+                break
+            # Case 2: firmware reports 'last executed' -> completion when index equals expected (debounced)
+            if current_idx == expected_idx:
+                seen_eq += 1
+                if seen_eq >= 2:
                     if self.verbose:
-                        print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
+                        print('pydobot: command %d executed (current==expected)' % expected_idx)
                     break
             else:
-                seen_ge = 0
+                seen_eq = 0
             time.sleep(0.05)
         else:
             raise TimeoutError('Command queued but not observed as executed within deadline (expected %d, last %s)' %
