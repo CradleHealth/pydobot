@@ -13,6 +13,66 @@ from .enums.ControlValues import ControlValues
 
 class Dobot:
 
+    _SYNC = b'\xAA\xAA'
+
+    def _read_exactly(self, n, deadline):
+        """Read exactly n bytes from serial or return None on timeout."""
+        buf = bytearray()
+        while len(buf) < n:
+            if time.monotonic() > deadline:
+                return None
+            chunk = self.ser.read(n - len(buf))
+            if not chunk:
+                # keep looping until deadline
+                continue
+            buf += chunk
+        return bytes(buf)
+
+    def _read_frame_raw(self, overall_timeout=0.5):
+        """
+        Read one Dobot frame and return the raw bytes (including header and checksum),
+        or None on timeout/invalid frame.
+        Frame format:
+          [0xAA][0xAA][LEN][ID][CTRL][PAYLOAD ...][CHK]
+        CHK = (sum of all bytes except checksum) & 0xFF
+        """
+        deadline = time.monotonic() + overall_timeout
+
+        # 1) Sync on 0xAA 0xAA
+        sync = b""
+        while time.monotonic() < deadline:
+            b = self.ser.read(1)
+            if not b:
+                continue
+            sync += b
+            if len(sync) > 2:
+                sync = sync[-2:]
+            if sync == self._SYNC:
+                break
+        else:
+            return None  # header not found
+
+        # 2) Read LEN, ID, CTRL
+        hdr = self._read_exactly(3, deadline)
+        if hdr is None:
+            return None
+        length, cmd_id, ctrl = hdr[0], hdr[1], hdr[2]
+
+        # 3) Read payload + checksum (length bytes)
+        rest = self._read_exactly(length, deadline)
+        if rest is None or len(rest) < 1:
+            return None
+
+        payload, checksum = rest[:-1], rest[-1]
+
+        # 4) Verify checksum
+        total = (sum(self._SYNC) + sum(hdr) + sum(payload)) & 0xFF
+        if total != checksum:
+            return None
+
+        # 5) Return raw frame
+        return self._SYNC + hdr + rest
+
     def __init__(self, port, verbose=False):
         threading.Thread.__init__(self)
 
@@ -23,7 +83,9 @@ class Dobot:
                                  baudrate=115200,
                                  parity=serial.PARITY_NONE,
                                  stopbits=serial.STOPBITS_ONE,
-                                 bytesize=serial.EIGHTBITS)
+                                 bytesize=serial.EIGHTBITS,
+                                 timeout=0.1,
+                                 write_timeout=0.1)
         is_open = self.ser.isOpen()
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
@@ -75,20 +137,22 @@ class Dobot:
         return response
 
     def _read_message(self):
-        time.sleep(0.1)
-        b = self.ser.read_all()
-        if len(b) > 0:
-            msg = Message(b)
-            if self.verbose:
-                print('pydobot: <<', msg)
-            return msg
-        return
+        raw = self._read_frame_raw(overall_timeout=0.5)
+        if raw is None:
+            return
+        msg = Message(raw)
+        if self.verbose:
+            print('pydobot: <<', msg)
+        return msg
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
         self._send_message(msg)
         response = self._read_message()
         self.lock.release()
+
+        if response is None:
+            raise TimeoutError("No valid response from Dobot (timeout/short frame)")
 
         if not wait:
             return response
