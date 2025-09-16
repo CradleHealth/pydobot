@@ -113,8 +113,8 @@ class Dobot:
                                  parity=serial.PARITY_NONE,
                                  stopbits=serial.STOPBITS_ONE,
                                  bytesize=serial.EIGHTBITS,
-                                 timeout=0.1,
-                                 write_timeout=0.1)
+                                 timeout=0.2,
+                                 write_timeout=0.5)
         is_open = self.ser.isOpen()
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
@@ -127,8 +127,8 @@ class Dobot:
             pass
         time.sleep(0.2)
 
-        self._set_queued_cmd_clear()
         self._set_queued_cmd_start_exec()
+        self._set_queued_cmd_clear()
         self._set_ptp_joint_params(200, 200, 200, 200, 200, 200, 200, 200)
         self._set_ptp_coordinate_params(velocity=200, acceleration=200)
         self._set_ptp_jump_params(10, 200)
@@ -139,23 +139,11 @@ class Dobot:
         Gets the current command index
     """
     def _get_queued_cmd_current_index(self):
-        # Issue an immediate GET directly (no _send_command) to avoid lock re-entrancy
         msg = Message()
         msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-        msg.ctrl = ControlValues.ZERO  # immediate GET, not queued
-
-        prev_verbose = getattr(self, 'verbose', False)
-        try:
-            self.verbose = False
-            self._send_message(msg)
-            resp = self._read_message(overall_timeout=1.0)
-        finally:
-            self.verbose = prev_verbose
-
-        if resp is None or resp.id != CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
-            return None
-
-        return struct.unpack_from('<I', resp.params, 0)[0]
+        response = self._send_command(msg)
+        idx = struct.unpack_from('L', response.params, 0)[0]
+        return idx
 
     """
         Gets the real-time pose of the Dobot
@@ -185,11 +173,11 @@ class Dobot:
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
         return response
 
-    def _read_message(self, overall_timeout=2.0):
+    def _read_message(self, overall_timeout=3.0):
         deadline = time.monotonic() + overall_timeout
         while time.monotonic() < deadline:
             # Small per-iteration timeout keeps things responsive and tolerates interleaving
-            slice_timeout = max(0.05, min(0.3, deadline - time.monotonic()))
+            slice_timeout = max(0.05, min(0.5, deadline - time.monotonic()))
             raw = self._read_frame_raw(overall_timeout=slice_timeout)
             if raw is None:
                 continue
@@ -199,162 +187,48 @@ class Dobot:
             return msg
         return None
 
-    def _safe_get_current_index(self, overall_timeout=1.5):
-        """Try to read the current queued index with its own deadline; return int or None on timeout."""
-        deadline = time.monotonic() + overall_timeout
-        # Build a one-off GET (immediate, not queued)
-        msg = Message()
-        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-        msg.ctrl = ControlValues.ZERO
-        # Suppress verbose noise during tight polling
-        prev_verbose = getattr(self, 'verbose', False)
-        try:
-            self.verbose = False
-            self._send_message(msg)
-            while time.monotonic() < deadline:
-                raw = self._read_message(overall_timeout=0.2)
-                if raw is None:
-                    continue
-                if raw.id == CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
-                    try:
-                        return struct.unpack_from('<I', raw.params, 0)[0]
-                    except Exception:
-                        return None
-                # Ignore unrelated frames
-            return None
-        finally:
-            self.verbose = prev_verbose
-
-    def _query_current_index(self, overall_timeout=0.6):
-        """
-        Poll the current queued index using the standard locked send/read path.
-        Returns an int index or None on timeout.
-        """
-        msg = Message()
-        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-        msg.ctrl = ControlValues.ZERO  # immediate GET
-
-        prev_verbose = getattr(self, 'verbose', False)
-        try:
-            self.verbose = False
-            # Manually inline a shortened _send_command with lock, to keep per-iteration latency low.
-            self.lock.acquire()
-            self._send_message(msg)
-            resp = self._read_message(overall_timeout=overall_timeout)
-            self.lock.release()
-        finally:
-            self.verbose = prev_verbose
-
-        if resp is None or resp.id != CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
-            return None
-        try:
-            return struct.unpack_from('<I', resp.params, 0)[0]
-        except Exception:
-            return None
-
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
-        before_idx = None
-        if wait:
-            try:
-                before_idx = self._get_queued_cmd_current_index()
-            except Exception:
-                before_idx = None
         self._send_message(msg)
 
         # Heavier-load scenarios (JUMP_XYZ, long moves, etc.) can delay replies.
         # Allow more time when the caller asked to wait.
-        reply_timeout = 2.5 if not wait else 5.0
+        reply_timeout = 4.0 if not wait else 15.0
         response = self._read_message(overall_timeout=reply_timeout)
 
         self.lock.release()
 
         if response is None:
-            # Fallback: controller sometimes withholds the immediate ACK during heavy JUMP_XYZ moves.
-            # If we had a 'before' index, poll until the index advances, treating that as acceptance.
-            if wait and before_idx is not None:
-                start_wait = time.monotonic()
-                # Allow up to the same reply_timeout window to observe index advancement
-                while time.monotonic() - start_wait < reply_timeout:
-                    try:
-                        cur = self._get_queued_cmd_current_index()
-                        if cur is not None and cur > before_idx:
-                            # Synthesize a minimal Message-like object so downstream logic stays unchanged
-                            fake = Message()
-                            fake.id = msg.id
-                            fake.ctrl = msg.ctrl
-                            fake.params = bytearray(struct.pack('<I', cur))
-                            response = fake
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(0.1)
-            # If still no response after fallback, one last probe to help with diagnostics/resync
-            if response is None:
-                _ = self._safe_get_current_index(overall_timeout=1.0)
-                raise TimeoutError("No valid response from Dobot (timeout/short frame)")
+            raise TimeoutError("No valid response from Dobot (timeout/short frame)")
 
         if not wait:
             return response
 
-        expected_idx = struct.unpack_from('<I', response.params, 0)[0]
+        expected_idx = struct.unpack_from('L', response.params, 0)[0]
         if self.verbose:
             print('pydobot: waiting for command', expected_idx)
 
-        # Wait for execution with tiny debounce and clear logging
-        exec_deadline = time.monotonic() + 30.0  # hard cap to avoid indefinite hangs
-        seen_eq = 0  # consecutive reads equal to expected (for 'last executed' semantics)
-        # Track when we last saw any index to optionally re-issue START_EXEC
-        last_seen = None
-        kick_sent = False
-        while time.monotonic() < exec_deadline:
-            current_idx = self._query_current_index(overall_timeout=0.6)
-            if current_idx is None:
-                if self.verbose:
-                    print('pydobot: exec wait — no index reply this cycle')
-                # If we haven't seen any reply for a while, kick the executor once
-                if not kick_sent:
-                    if last_seen is None:
-                        last_seen = time.monotonic()
-                    elif time.monotonic() - last_seen > 2.0:
-                        try:
-                            self._set_queued_cmd_start_exec()
-                            kick_sent = True
-                            if self.verbose:
-                                print('pydobot: queue start exec re-issued')
-                        except Exception:
-                            pass
-                time.sleep(0.05)
+        while True:
+            current_idx = self._get_queued_cmd_current_index()
+
+            if current_idx != expected_idx:
+                time.sleep(0.1)
                 continue
-            last_seen = time.monotonic()
+
             if self.verbose:
-                print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
-            # Case 1: firmware reports 'currently executing' -> completion when index advances past expected
-            if current_idx > expected_idx:
-                if self.verbose:
-                    print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
-                break
-            # Case 2: firmware reports 'last executed' -> completion when index equals expected (debounced)
-            if current_idx == expected_idx:
-                seen_eq += 1
-                if seen_eq >= 2:
-                    if self.verbose:
-                        print('pydobot: command %d executed (current==expected)' % expected_idx)
-                    break
-            else:
-                seen_eq = 0
-            time.sleep(0.05)
-        else:
-            raise TimeoutError('Command queued but not observed as executed within deadline (expected %d, last %s)' %
-                               (expected_idx, str(current_idx)))
+                print('pydobot: command %d executed' % current_idx)
+            break
 
         return response
 
     def _send_message(self, msg):
-        time.sleep(0.1)
         if self.verbose:
             print('pydobot: >>', msg)
         self.ser.write(msg.bytes())
+        try:
+            self.ser.flush()  # ensure bytes leave the OS buffer promptly
+        except Exception:
+            pass
 
     """
         Executes the CP Command
