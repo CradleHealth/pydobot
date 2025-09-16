@@ -50,6 +50,8 @@ class Dobot:
             if sync == self._SYNC:
                 break
         else:
+            if self.verbose:
+                print('pydobot: !! timeout waiting for frame header (0xAA 0xAA)')
             return None  # header not found
 
         # 2) Read LEN, ID, CTRL
@@ -65,9 +67,16 @@ class Dobot:
 
         payload, checksum = rest[:-1], rest[-1]
 
-        # 4) Verify checksum
-        total = (sum(hdr) + sum(payload)) & 0xFF
-        if total != checksum:
+        # 4) Verify checksum. Some firmware variants compute checksum without LEN.
+        chk_with_len = (sum(hdr) + sum(payload)) & 0xFF
+        chk_wo_len   = ((hdr[1] + hdr[2] + sum(payload)) & 0xFF)  # ID + CTRL + payload only
+        if checksum != chk_with_len and checksum != chk_wo_len:
+            if self.verbose:
+                full = self._SYNC + hdr + payload + bytes([checksum])
+                def hx(b): return ' '.join(f'{x:02X}' for x in b)
+                print('pydobot: !! checksum mismatch')
+                print('         raw:', hx(full))
+                print(f'         len={hdr[0]} id=0x{hdr[1]:02X} ctrl=0x{hdr[2]:02X} calc_len=0x{chk_with_len:02X} calc_no_len=0x{chk_wo_len:02X} got=0x{checksum:02X}')
             return None
 
         # 5) Return raw frame
@@ -89,6 +98,14 @@ class Dobot:
         is_open = self.ser.isOpen()
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
+
+        # Drain any stale bytes and give the controller a moment to settle
+        try:
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+        except Exception:
+            pass
+        time.sleep(0.2)
 
         self._set_queued_cmd_start_exec()
         self._set_queued_cmd_clear()
@@ -137,7 +154,7 @@ class Dobot:
         return response
 
     def _read_message(self):
-        raw = self._read_frame_raw(overall_timeout=1.0)
+        raw = self._read_frame_raw(overall_timeout=1.5)
         if raw is None:
             return
         msg = Message(raw)
