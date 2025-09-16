@@ -266,7 +266,7 @@ class Dobot:
 
         # Wait for execution with tiny debounce and clear logging
         exec_deadline = time.monotonic() + 30.0  # hard cap to avoid indefinite hangs
-        seen_ge = 0  # require two consecutive reads >= expected
+        seen_ge = 0  # require two consecutive reads > expected
         while time.monotonic() < exec_deadline:
             current_idx = self._get_queued_cmd_current_index()
             if current_idx is None:
@@ -274,11 +274,13 @@ class Dobot:
                 continue
             if self.verbose:
                 print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
-            if current_idx >= expected_idx:
+            # Some firmware reports 'current index' as the command being executed.
+            # Treat completion as the index advancing *past* the expected command.
+            if current_idx > expected_idx:
                 seen_ge += 1
                 if seen_ge >= 2:
                     if self.verbose:
-                        print('pydobot: command %d executed (current=%d)' % (expected_idx, current_idx))
+                        print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
                     break
             else:
                 seen_ge = 0
