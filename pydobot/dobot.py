@@ -193,25 +193,28 @@ class Dobot:
     def _safe_get_current_index(self, overall_timeout=1.5):
         """Try to read the current queued index with its own deadline; return int or None on timeout."""
         deadline = time.monotonic() + overall_timeout
+        # Build a one-off GET (immediate, not queued)
+        msg = Message()
+        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
+        msg.ctrl = ControlValues.ZERO
+        # Suppress verbose noise during tight polling
+        prev_verbose = getattr(self, 'verbose', False)
         try:
-            msg = Message()
-            msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-            # This request is small and should respond quickly
+            self.verbose = False
             self._send_message(msg)
             while time.monotonic() < deadline:
                 raw = self._read_message(overall_timeout=0.2)
                 if raw is None:
                     continue
-                # Expect the reply for current index; if it's a different frame, keep looping
                 if raw.id == CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
                     try:
                         return struct.unpack_from('<I', raw.params, 0)[0]
                     except Exception:
                         return None
-                # Otherwise ignore unrelated frames during resync
+                # Ignore unrelated frames
             return None
-        except Exception:
-            return None
+        finally:
+            self.verbose = prev_verbose
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
@@ -265,13 +268,29 @@ class Dobot:
         # Wait for execution with tiny debounce and clear logging
         exec_deadline = time.monotonic() + 30.0  # hard cap to avoid indefinite hangs
         seen_eq = 0  # consecutive reads equal to expected (for 'last executed' semantics)
+        # Track when we last saw any index to optionally re-issue START_EXEC
+        last_seen = None
+        kick_sent = False
         while time.monotonic() < exec_deadline:
-            current_idx = self._get_queued_cmd_current_index()
+            current_idx = self._safe_get_current_index(overall_timeout=0.6)
             if current_idx is None:
                 if self.verbose:
                     print('pydobot: exec wait — no index reply this cycle')
+                # If we haven't seen any reply for a while, kick the executor once
+                if not kick_sent:
+                    if last_seen is None:
+                        last_seen = time.monotonic()
+                    elif time.monotonic() - last_seen > 2.0:
+                        try:
+                            self._set_queued_cmd_start_exec()
+                            kick_sent = True
+                            if self.verbose:
+                                print('pydobot: queue start exec re-issued')
+                        except Exception:
+                            pass
                 time.sleep(0.05)
                 continue
+            last_seen = time.monotonic()
             if self.verbose:
                 print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
             # Case 1: firmware reports 'currently executing' -> completion when index advances past expected
