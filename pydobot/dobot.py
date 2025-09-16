@@ -113,8 +113,8 @@ class Dobot:
                                  parity=serial.PARITY_NONE,
                                  stopbits=serial.STOPBITS_ONE,
                                  bytesize=serial.EIGHTBITS,
-                                 timeout=0.2,
-                                 write_timeout=0.5)
+                                 timeout=0.1,
+                                 write_timeout=0.1)
         is_open = self.ser.isOpen()
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
@@ -185,11 +185,11 @@ class Dobot:
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
         return response
 
-    def _read_message(self, overall_timeout=3.0):
+    def _read_message(self, overall_timeout=2.0):
         deadline = time.monotonic() + overall_timeout
         while time.monotonic() < deadline:
             # Small per-iteration timeout keeps things responsive and tolerates interleaving
-            slice_timeout = max(0.05, min(0.5, deadline - time.monotonic()))
+            slice_timeout = max(0.05, min(0.3, deadline - time.monotonic()))
             raw = self._read_frame_raw(overall_timeout=slice_timeout)
             if raw is None:
                 continue
@@ -264,7 +264,7 @@ class Dobot:
 
         # Heavier-load scenarios (JUMP_XYZ, long moves, etc.) can delay replies.
         # Allow more time when the caller asked to wait.
-        reply_timeout = 4.0 if not wait else 15.0
+        reply_timeout = 2.5 if not wait else 5.0
         response = self._read_message(overall_timeout=reply_timeout)
 
         self.lock.release()
@@ -351,13 +351,10 @@ class Dobot:
         return response
 
     def _send_message(self, msg):
+        time.sleep(0.1)
         if self.verbose:
             print('pydobot: >>', msg)
         self.ser.write(msg.bytes())
-        try:
-            self.ser.flush()  # ensure bytes leave the OS buffer promptly
-        except Exception:
-            pass
 
     """
         Executes the CP Command
