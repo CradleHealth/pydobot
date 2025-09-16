@@ -142,7 +142,7 @@ class Dobot:
         msg = Message()
         msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
         response = self._send_command(msg)
-        idx = struct.unpack_from('L', response.params, 0)[0]
+        idx = struct.unpack_from('<I', response.params, 0)[0]
         return idx
 
     """
@@ -202,7 +202,7 @@ class Dobot:
                 # Expect the reply for current index; if it's a different frame, keep looping
                 if raw.id == CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
                     try:
-                        return struct.unpack_from('L', raw.params, 0)[0]
+                        return struct.unpack_from('<I', raw.params, 0)[0]
                     except Exception:
                         return None
                 # Otherwise ignore unrelated frames during resync
@@ -241,7 +241,7 @@ class Dobot:
                             fake = Message()
                             fake.id = msg.id
                             fake.ctrl = msg.ctrl
-                            fake.params = bytearray(struct.pack('L', cur))
+                            fake.params = bytearray(struct.pack('<I', cur))
                             response = fake
                             break
                     except Exception:
@@ -255,20 +255,26 @@ class Dobot:
         if not wait:
             return response
 
-        expected_idx = struct.unpack_from('L', response.params, 0)[0]
+        expected_idx = struct.unpack_from('<I', response.params, 0)[0]
         if self.verbose:
             print('pydobot: waiting for command', expected_idx)
 
-        while True:
+        # Wait for execution: allow >= to handle cases where index jumps ahead (or multiple commands batched)
+        exec_deadline = time.monotonic() + 30.0  # hard cap to avoid indefinite hangs
+        while time.monotonic() < exec_deadline:
             current_idx = self._get_queued_cmd_current_index()
-
-            if current_idx != expected_idx:
-                time.sleep(0.1)
+            if current_idx is None:
+                time.sleep(0.05)
                 continue
-
-            if self.verbose:
-                print('pydobot: command %d executed' % current_idx)
-            break
+            # Handle wrap-around on 32-bit counters and allow >=
+            if ((current_idx - expected_idx) & 0xFFFFFFFF) < 0x80000000 and current_idx >= expected_idx:
+                if self.verbose:
+                    print('pydobot: command %d executed (current=%d)' % (expected_idx, current_idx))
+                break
+            time.sleep(0.05)
+        else:
+            raise TimeoutError('Command queued but not observed as executed within deadline (expected %d, last %s)' %
+                               (expected_idx, str(current_idx)))
 
         return response
 
