@@ -264,18 +264,24 @@ class Dobot:
         if self.verbose:
             print('pydobot: waiting for command', expected_idx)
 
-        # Wait for execution: allow >= to handle cases where index jumps ahead (or multiple commands batched)
+        # Wait for execution with tiny debounce and clear logging
         exec_deadline = time.monotonic() + 30.0  # hard cap to avoid indefinite hangs
+        seen_ge = 0  # require two consecutive reads >= expected
         while time.monotonic() < exec_deadline:
             current_idx = self._get_queued_cmd_current_index()
             if current_idx is None:
                 time.sleep(0.05)
                 continue
-            # Handle wrap-around on 32-bit counters and allow >=
-            if ((current_idx - expected_idx) & 0xFFFFFFFF) < 0x80000000 and current_idx >= expected_idx:
-                if self.verbose:
-                    print('pydobot: command %d executed (current=%d)' % (expected_idx, current_idx))
-                break
+            if self.verbose:
+                print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
+            if current_idx >= expected_idx:
+                seen_ge += 1
+                if seen_ge >= 2:
+                    if self.verbose:
+                        print('pydobot: command %d executed (current=%d)' % (expected_idx, current_idx))
+                    break
+            else:
+                seen_ge = 0
             time.sleep(0.05)
         else:
             raise TimeoutError('Command queued but not observed as executed within deadline (expected %d, last %s)' %
