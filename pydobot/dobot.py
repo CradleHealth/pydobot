@@ -139,21 +139,14 @@ class Dobot:
         Gets the current command index
     """
     def _get_queued_cmd_current_index(self):
-        # Use an immediate GET without going through _send_command to avoid lock re-entrancy
-        prev_verbose = getattr(self, 'verbose', False)
-        try:
-            self.verbose = False  # suppress noisy prints during tight polling
-            msg = Message()
-            msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-            msg.ctrl = ControlValues.ZERO  # immediate GET, not queued
-            self._send_message(msg)
-            resp = self._read_message(overall_timeout=2.0)
-        finally:
-            self.verbose = prev_verbose
+        # Use standard command path; lock is not held during the execution wait loop
+        msg = Message()
+        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
+        msg.ctrl = ControlValues.ZERO  # immediate GET, not queued
+        resp = self._send_command(msg)  # wait=False by default
         if resp is None or resp.id != CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
             return None
-        idx = struct.unpack_from('<I', resp.params, 0)[0]
-        return idx
+        return struct.unpack_from('<I', resp.params, 0)[0]
 
     """
         Gets the real-time pose of the Dobot
@@ -275,6 +268,8 @@ class Dobot:
         while time.monotonic() < exec_deadline:
             current_idx = self._get_queued_cmd_current_index()
             if current_idx is None:
+                if self.verbose:
+                    print('pydobot: exec wait — no index reply this cycle')
                 time.sleep(0.05)
                 continue
             if self.verbose:
