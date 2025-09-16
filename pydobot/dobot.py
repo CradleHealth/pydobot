@@ -139,10 +139,15 @@ class Dobot:
         Gets the current command index
     """
     def _get_queued_cmd_current_index(self):
+        # Use an immediate GET without going through _send_command to avoid lock re-entrancy
         msg = Message()
         msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
-        response = self._send_command(msg)
-        idx = struct.unpack_from('<I', response.params, 0)[0]
+        msg.ctrl = ControlValues.ZERO  # immediate GET, not queued
+        self._send_message(msg)
+        resp = self._read_message(overall_timeout=2.0)
+        if resp is None or resp.id != CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
+            return None
+        idx = struct.unpack_from('<I', resp.params, 0)[0]
         return idx
 
     """
