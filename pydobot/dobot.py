@@ -127,8 +127,8 @@ class Dobot:
             pass
         time.sleep(0.2)
 
-        self._set_queued_cmd_start_exec()
         self._set_queued_cmd_clear()
+        self._set_queued_cmd_start_exec()
         self._set_ptp_joint_params(200, 200, 200, 200, 200, 200, 200, 200)
         self._set_ptp_coordinate_params(velocity=200, acceleration=200)
         self._set_ptp_jump_params(10, 200)
