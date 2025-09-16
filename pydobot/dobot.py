@@ -173,19 +173,29 @@ class Dobot:
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
         return response
 
-    def _read_message(self):
-        raw = self._read_frame_raw(overall_timeout=1.5)
-        if raw is None:
-            return
-        msg = Message(raw)
-        if self.verbose:
-            print('pydobot: <<', msg)
-        return msg
+    def _read_message(self, overall_timeout=2.0):
+        deadline = time.monotonic() + overall_timeout
+        while time.monotonic() < deadline:
+            # Small per-iteration timeout keeps things responsive and tolerates interleaving
+            slice_timeout = max(0.05, min(0.3, deadline - time.monotonic()))
+            raw = self._read_frame_raw(overall_timeout=slice_timeout)
+            if raw is None:
+                continue
+            msg = Message(raw)
+            if self.verbose:
+                print('pydobot: <<', msg)
+            return msg
+        return None
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
         self._send_message(msg)
-        response = self._read_message()
+
+        # Heavier-load scenarios (JUMP_XYZ, long moves, etc.) can delay replies.
+        # Allow more time when the caller asked to wait.
+        reply_timeout = 2.5 if not wait else 5.0
+        response = self._read_message(overall_timeout=reply_timeout)
+
         self.lock.release()
 
         if response is None:
