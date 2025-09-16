@@ -187,8 +187,37 @@ class Dobot:
             return msg
         return None
 
+    def _safe_get_current_index(self, overall_timeout=1.5):
+        """Try to read the current queued index with its own deadline; return int or None on timeout."""
+        deadline = time.monotonic() + overall_timeout
+        try:
+            msg = Message()
+            msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
+            # This request is small and should respond quickly
+            self._send_message(msg)
+            while time.monotonic() < deadline:
+                raw = self._read_message(overall_timeout=0.2)
+                if raw is None:
+                    continue
+                # Expect the reply for current index; if it's a different frame, keep looping
+                if raw.id == CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX:
+                    try:
+                        return struct.unpack_from('L', raw.params, 0)[0]
+                    except Exception:
+                        return None
+                # Otherwise ignore unrelated frames during resync
+            return None
+        except Exception:
+            return None
+
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
+        before_idx = None
+        if wait:
+            try:
+                before_idx = self._get_queued_cmd_current_index()
+            except Exception:
+                before_idx = None
         self._send_message(msg)
 
         # Heavier-load scenarios (JUMP_XYZ, long moves, etc.) can delay replies.
@@ -199,7 +228,29 @@ class Dobot:
         self.lock.release()
 
         if response is None:
-            raise TimeoutError("No valid response from Dobot (timeout/short frame)")
+            # Fallback: controller sometimes withholds the immediate ACK during heavy JUMP_XYZ moves.
+            # If we had a 'before' index, poll until the index advances, treating that as acceptance.
+            if wait and before_idx is not None:
+                start_wait = time.monotonic()
+                # Allow up to the same reply_timeout window to observe index advancement
+                while time.monotonic() - start_wait < reply_timeout:
+                    try:
+                        cur = self._get_queued_cmd_current_index()
+                        if cur is not None and cur > before_idx:
+                            # Synthesize a minimal Message-like object so downstream logic stays unchanged
+                            fake = Message()
+                            fake.id = msg.id
+                            fake.ctrl = msg.ctrl
+                            fake.params = bytearray(struct.pack('L', cur))
+                            response = fake
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+            # If still no response after fallback, one last probe to help with diagnostics/resync
+            if response is None:
+                _ = self._safe_get_current_index(overall_timeout=1.0)
+                raise TimeoutError("No valid response from Dobot (timeout/short frame)")
 
         if not wait:
             return response
