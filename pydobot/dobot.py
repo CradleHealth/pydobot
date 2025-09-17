@@ -32,6 +32,18 @@ class Dobot:
             timeout=0.2,          # short, slice-based reads
             write_timeout=0.5     # avoid blocking on write
         )
+        # streaming receive buffer for robust frame assembly
+        self._rxbuf = bytearray()
+        is_open = self.ser.isOpen()
+        if self.verbose:
+            print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
+        self._set_queued_cmd_clear()
+        self._set_queued_cmd_start_exec()
+        self._set_ptp_joint_params(200, 200, 200, 200, 200, 200, 200, 200)
+        self._set_ptp_coordinate_params(velocity=200, acceleration=200)
+        self._set_ptp_jump_params(10, 200)
+        self._set_ptp_common_params(velocity=100, acceleration=100)
+        self._get_pose()
     def set_queue_clear_every(self, n: int):
         """Enable/disable periodic queue clear: set N>0 to clear every N completed queued commands; 0 disables."""
         self._queue_clear_every = max(0, int(n))
@@ -49,19 +61,6 @@ class Dobot:
         except Exception as e:
             if self.verbose:
                 print(f"pydobot: queue hygiene failed: {e}")
-        # streaming receive buffer for robust frame assembly
-        self._rxbuf = bytearray()
-        is_open = self.ser.isOpen()
-        if self.verbose:
-            print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
-
-        self._set_queued_cmd_clear()
-        self._set_queued_cmd_start_exec()
-        self._set_ptp_joint_params(200, 200, 200, 200, 200, 200, 200, 200)
-        self._set_ptp_coordinate_params(velocity=200, acceleration=200)
-        self._set_ptp_jump_params(10, 200)
-        self._set_ptp_common_params(velocity=100, acceleration=100)
-        self._get_pose()
 
     """
         Gets the current command index
@@ -104,25 +103,8 @@ class Dobot:
         self.j4 = struct.unpack_from('f', response.params, 28)[0]
 
         if self.verbose:
-            print("pydobot: x:%03.1f \
-                            y:%03.1f \
-                            z:%03.1f \
-                            r:%03.1f \
-                            j1:%03.1f \
-                            j2:%03.1f \
-                            j3:%03.1f \
-                            j4:%03.1f" %
+            print("pydobot: x:%03.1f                             y:%03.1f                             z:%03.1f                             r:%03.1f                             j1:%03.1f                             j2:%03.1f                             j3:%03.1f                             j4:%03.1f" %
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
-        else:
-            raise TimeoutError('Command queued but not observed as executed within deadline (expected %d)' % expected_idx)
-
-        # At this point, the queued command has completed.
-        if msg.ctrl == ControlValues.THREE:
-            self._queued_since_clear += 1
-            if self._queue_clear_every and (self._queued_since_clear % self._queue_clear_every == 0):
-                # Use documented pydobot wrappers that match the official Dobot protocol.
-                self._queue_hygiene_clear_and_restart()
-
         return response
 
     def _read_message(self, overall_timeout=2.0):
