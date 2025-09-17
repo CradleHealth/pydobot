@@ -53,6 +53,19 @@ class Dobot:
         idx = struct.unpack_from('<Q', response.params, 0)[0]
         return idx
 
+    def _get_queued_cmd_left_space(self):
+        msg = Message()
+        msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_LEFT_SPACE
+        msg.ctrl = ControlValues.ZERO  # immediate GET
+        resp = self._send_command(msg)
+        if resp is None or resp.params is None or len(resp.params) == 0:
+            return None
+        # Protocol returns a little-endian integer; use 64-bit to be safe
+        # If fewer than 8 bytes are present, pad by reading as 32-bit
+        if len(resp.params) >= 8:
+            return struct.unpack_from('<Q', resp.params, 0)[0]
+        return struct.unpack_from('<I', resp.params, 0)[0]
+
     """
         Gets the real-time pose of the Dobot
     """
@@ -145,10 +158,25 @@ class Dobot:
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
+        # For queued commands, preflight the queue space to avoid controller backpressure delaying the ACK.
+        if msg.ctrl == ControlValues.THREE:
+            space_deadline = time.time() + 5.0  # wait up to 5s for space
+            while time.time() < space_deadline:
+                try:
+                    left = self._get_queued_cmd_left_space()
+                except Exception:
+                    left = None
+                if left is None:
+                    break  # if we can't read it, don't block; proceed to send
+                if left > 0:
+                    break
+                if self.verbose:
+                    print('pydobot: queue full, waiting for space...')
+                time.sleep(0.05)
         self._send_message(msg)
         # Wait specifically for the ACK with the same ID, ignore unrelated frames
         # Some controllers (e.g., Magician Lite) can delay the ACK slightly under load.
-        deadline = time.time() + 6.0  # was 3.0
+        deadline = time.time() + 8.0
         response = None
         while time.time() < deadline:
             resp = self._read_message(overall_timeout=1.0)  # was 0.5
