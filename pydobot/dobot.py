@@ -28,8 +28,8 @@ class Dobot:
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
 
-        self._set_queued_cmd_start_exec()
         self._set_queued_cmd_clear()
+        self._set_queued_cmd_start_exec()
         self._set_ptp_joint_params(200, 200, 200, 200, 200, 200, 200, 200)
         self._set_ptp_coordinate_params(velocity=200, acceleration=200)
         self._set_ptp_jump_params(10, 200)
@@ -42,8 +42,9 @@ class Dobot:
     def _get_queued_cmd_current_index(self):
         msg = Message()
         msg.id = CommunicationProtocolIDs.GET_QUEUED_CMD_CURRENT_INDEX
+        msg.ctrl = ControlValues.ZERO  # immediate GET
         response = self._send_command(msg)
-        idx = struct.unpack_from('L', response.params, 0)[0]
+        idx = struct.unpack_from('<Q', response.params, 0)[0]
         return idx
 
     """
@@ -93,20 +94,34 @@ class Dobot:
         if not wait:
             return response
 
-        expected_idx = struct.unpack_from('L', response.params, 0)[0]
-        if self.verbose:
-            print('pydobot: waiting for command', expected_idx)
+        expected_idx = struct.unpack_from('<Q', response.params, 0)[0]
 
-        while True:
+        # Wait for execution to complete. Some firmware reports the executing index (done when current > expected),
+        # others report the last executed index (done when current == expected). Add a hard cap to avoid hangs.
+        deadline = time.time() + 30.0
+        seen_eq = 0
+        while time.time() < deadline:
             current_idx = self._get_queued_cmd_current_index()
-
-            if current_idx != expected_idx:
-                time.sleep(0.1)
+            if current_idx is None:
+                time.sleep(0.05)
                 continue
-
             if self.verbose:
-                print('pydobot: command %d executed' % current_idx)
-            break
+                print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
+            if current_idx > expected_idx:
+                if self.verbose:
+                    print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
+                break
+            if current_idx == expected_idx:
+                seen_eq += 1
+                if seen_eq >= 2:
+                    if self.verbose:
+                        print('pydobot: command %d executed (current==expected)' % expected_idx)
+                    break
+            else:
+                seen_eq = 0
+            time.sleep(0.05)
+        else:
+            raise TimeoutError('Command queued but not observed as executed within deadline (expected %d)' % expected_idx)
 
         return response
 
