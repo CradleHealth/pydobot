@@ -146,9 +146,21 @@ class Dobot:
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
         self._send_message(msg)
-        # allow a reasonable window for the immediate ACK frame
-        response = self._read_message(overall_timeout=3.0)
+        # Wait specifically for the ACK with the same ID, ignore unrelated frames
+        deadline = time.time() + 3.0
+        response = None
+        while time.time() < deadline:
+            resp = self._read_message(overall_timeout=0.5)
+            if resp is None:
+                continue
+            if resp.id == msg.id:
+                response = resp
+                break
+            # ignore unrelated frames (e.g., delayed responses)
         self.lock.release()
+
+        if response is None:
+            raise TimeoutError(f'No ACK received for command id=0x{msg.id:02X} within timeout')
 
         if not wait:
             return response
