@@ -89,6 +89,9 @@ class Dobot:
         self._send_message(msg)
         response = self._read_message()
         self.lock.release()
+        if response is None:
+            print("Receive empty response")
+            return
 
         if not wait:
             return response
