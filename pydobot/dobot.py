@@ -19,11 +19,17 @@ class Dobot:
         self._on = True
         self.verbose = verbose
         self.lock = threading.Lock()
-        self.ser = serial.Serial(port,
-                                 baudrate=115200,
-                                 parity=serial.PARITY_NONE,
-                                 stopbits=serial.STOPBITS_ONE,
-                                 bytesize=serial.EIGHTBITS)
+        self.ser = serial.Serial(
+            port,
+            baudrate=115200,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            bytesize=serial.EIGHTBITS,
+            timeout=0.2,          # short, slice-based reads
+            write_timeout=0.5     # avoid blocking on write
+        )
+        # streaming receive buffer for robust frame assembly
+        self._rxbuf = bytearray()
         is_open = self.ser.isOpen()
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
@@ -75,20 +81,74 @@ class Dobot:
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
         return response
 
-    def _read_message(self):
-        time.sleep(0.1)
-        b = self.ser.read_all()
-        if len(b) > 0:
-            msg = Message(b)
-            if self.verbose:
-                print('pydobot: <<', msg)
-            return msg
-        return
+    def _read_message(self, overall_timeout=2.0):
+        """Read exactly one framed message using AA AA header and checksums.
+        Returns a Message or None on timeout."""
+        deadline = time.time() + overall_timeout
+        while time.time() < deadline:
+            # Read at least one byte (serial timeout governs per-call wait)
+            chunk = self.ser.read(self.ser.in_waiting or 1)
+            if chunk:
+                self._rxbuf.extend(chunk)
+            # Try to find a complete frame in the buffer
+            while True:
+                buf = self._rxbuf
+                # need at least header + len + lenchk + tail chk
+                if len(buf) < 5:
+                    break
+                # find sync 0xAA 0xAA
+                try:
+                    start = buf.index(0xAA)
+                    # ensure second 0xAA follows
+                    if start + 1 >= len(buf):
+                        break
+                    if buf[start + 1] != 0xAA:
+                        # drop the first AA and continue searching
+                        del buf[:start + 1]
+                        continue
+                except ValueError:
+                    # no 0xAA found; drop all
+                    self._rxbuf.clear()
+                    break
+                # ensure we have len and len checksum
+                if start + 4 > len(buf):
+                    break
+                length = buf[start + 2]
+                len_chk = buf[start + 3]
+                if ((length + len_chk) & 0xFF) != 0:
+                    # bad len checksum; drop first byte and resync
+                    del buf[:start + 1]
+                    continue
+                total = 2 + 2 + length + 1  # hdr(2) + len+lenchk(2) + body(length) + bodychk(1)
+                if start + total > len(buf):
+                    # need more bytes
+                    break
+                frame = bytes(buf[start:start + total])
+                # validate body checksum (two's complement)
+                body_sum = sum(frame[2:2 + 2 + length]) & 0xFF
+                body_chk = frame[-1]
+                if ((body_sum + body_chk) & 0xFF) != 0:
+                    # bad body checksum; drop first header byte and resync
+                    del buf[:start + 1]
+                    continue
+                # we have a good frame; remove it from buffer and parse
+                del buf[:start + total]
+                try:
+                    msg = Message(frame)
+                except Exception:
+                    # if parsing fails, continue searching
+                    continue
+                if self.verbose:
+                    print('pydobot: <<', msg)
+                return msg
+            # no complete frame yet; loop until deadline
+        return None
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
         self._send_message(msg)
-        response = self._read_message()
+        # allow a reasonable window for the immediate ACK frame
+        response = self._read_message(overall_timeout=3.0)
         self.lock.release()
 
         if not wait:
@@ -126,10 +186,13 @@ class Dobot:
         return response
 
     def _send_message(self, msg):
-        time.sleep(0.1)
         if self.verbose:
             print('pydobot: >>', msg)
         self.ser.write(msg.bytes())
+        try:
+            self.ser.flush()
+        except Exception:
+            pass
 
     """
         Executes the CP Command
