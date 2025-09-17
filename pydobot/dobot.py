@@ -149,12 +149,14 @@ class Dobot:
         return None
 
     def _send_command(self, msg, wait=False):
-        self.lock.acquire()
         baseline_idx = None
-        try:
-            baseline_idx = self._get_queued_cmd_current_index()
-        except Exception:
-            baseline_idx = None
+        # Only sample a baseline for queued commands where we'll wait; doing this inside the lock would deadlock
+        if wait and getattr(msg, 'ctrl', None) == ControlValues.THREE:
+            try:
+                baseline_idx = self._get_queued_cmd_current_index()
+            except Exception:
+                baseline_idx = None
+        self.lock.acquire()
         self._send_message(msg)
         # Wait specifically for the ACK with the same ID, ignore unrelated frames
         deadline = time.time() + 4.0
