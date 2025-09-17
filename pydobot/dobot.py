@@ -13,14 +13,10 @@ from .enums.ControlValues import ControlValues
 
 class Dobot:
 
-    def __init__(self, port, verbose=False, queue_clear_every: int = 0):
+    def __init__(self, port, verbose=False):
         threading.Thread.__init__(self)
 
         self._on = True
-        # Queue hygiene: clear the device's queued command buffer every N completed queued commands.
-        # 0 disables this behavior. See Dobot protocol (Queued Cmd Clear/Start/Stop) and pydobot methods below.
-        self._queue_clear_every = int(queue_clear_every) if queue_clear_every is not None else 0
-        self._queued_since_clear = 0
         self.verbose = verbose
         self.lock = threading.Lock()
         self.ser = serial.Serial(
@@ -44,23 +40,6 @@ class Dobot:
         self._set_ptp_jump_params(10, 200)
         self._set_ptp_common_params(velocity=100, acceleration=100)
         self._get_pose()
-    def set_queue_clear_every(self, n: int):
-        """Enable/disable periodic queue clear: set N>0 to clear every N completed queued commands; 0 disables."""
-        self._queue_clear_every = max(0, int(n))
-        if self.verbose:
-            print(f"pydobot: queue_clear_every set to {self._queue_clear_every}")
-
-    def _queue_hygiene_clear_and_restart(self):
-        """Perform a safe queue hygiene cycle: stop -> clear -> start (per protocol)."""
-        try:
-            if self.verbose:
-                print("pydobot: queue hygiene — stop/clear/start")
-            self._set_queued_cmd_stop_exec()
-            self._set_queued_cmd_clear()
-            self._set_queued_cmd_start_exec()
-        except Exception as e:
-            if self.verbose:
-                print(f"pydobot: queue hygiene failed: {e}")
 
     """
         Gets the current command index
@@ -171,28 +150,17 @@ class Dobot:
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
-        # For queued commands, preflight the queue space to avoid controller backpressure delaying the ACK.
-        if msg.ctrl == ControlValues.THREE:
-            space_deadline = time.time() + 5.0  # wait up to 5s for space
-            while time.time() < space_deadline:
-                try:
-                    left = self._get_queued_cmd_left_space()
-                except Exception:
-                    left = None
-                if left is None:
-                    break  # if we can't read it, don't block; proceed to send
-                if left > 0:
-                    break
-                if self.verbose:
-                    print('pydobot: queue full, waiting for space...')
-                time.sleep(0.05)
+        baseline_idx = None
+        try:
+            baseline_idx = self._get_queued_cmd_current_index()
+        except Exception:
+            baseline_idx = None
         self._send_message(msg)
         # Wait specifically for the ACK with the same ID, ignore unrelated frames
-        # Some controllers (e.g., Magician Lite) can delay the ACK slightly under load.
-        deadline = time.time() + 8.0
+        deadline = time.time() + 4.0
         response = None
         while time.time() < deadline:
-            resp = self._read_message(overall_timeout=1.0)  # was 0.5
+            resp = self._read_message(overall_timeout=0.8)
             if resp is None:
                 continue
             if resp.id == msg.id:
@@ -202,39 +170,67 @@ class Dobot:
         self.lock.release()
 
         if response is None:
-            raise TimeoutError(f'No ACK received for command id=0x{msg.id:02X} within timeout')
+            if msg.ctrl == ControlValues.THREE:  # queued command: proceed without ACK (fire-and-forget)
+                if self.verbose:
+                    print(f'pydobot: ! no ACK for id=0x{msg.id:02X}; proceeding (queued)')
+            else:
+                raise TimeoutError(f'No ACK received for command id=0x{msg.id:02X} within timeout')
 
         if not wait:
             return response
 
-        expected_idx = struct.unpack_from('<Q', response.params, 0)[0]
+        expected_idx = None
+        if response is not None and response.params is not None and len(response.params) >= 8:
+            try:
+                expected_idx = struct.unpack_from('<Q', response.params, 0)[0]
+            except Exception:
+                expected_idx = None
 
         # Wait for execution to complete. Some firmware reports the executing index (done when current > expected),
         # others report the last executed index (done when current == expected). Add a hard cap to avoid hangs.
-        deadline = time.time() + 30.0
-        seen_eq = 0
-        while time.time() < deadline:
-            current_idx = self._get_queued_cmd_current_index()
-            if current_idx is None:
-                time.sleep(0.05)
-                continue
-            if self.verbose:
-                print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
-            if current_idx > expected_idx:
+        if expected_idx is not None:
+            deadline = time.time() + 30.0
+            seen_eq = 0
+            while time.time() < deadline:
+                current_idx = self._get_queued_cmd_current_index()
+                if current_idx is None:
+                    time.sleep(0.05)
+                    continue
                 if self.verbose:
-                    print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
-                break
-            if current_idx == expected_idx:
-                seen_eq += 1
-                if seen_eq >= 2:
+                    print(f'pydobot: exec wait current={current_idx} expected={expected_idx}')
+                if current_idx > expected_idx:
                     if self.verbose:
-                        print('pydobot: command %d executed (current==expected)' % expected_idx)
+                        print('pydobot: command %d executed (current advanced to %d)' % (expected_idx, current_idx))
                     break
+                if current_idx == expected_idx:
+                    seen_eq += 1
+                    if seen_eq >= 2:
+                        if self.verbose:
+                            print('pydobot: command %d executed (current==expected)' % expected_idx)
+                        break
+                else:
+                    seen_eq = 0
+                time.sleep(0.05)
             else:
-                seen_eq = 0
-            time.sleep(0.05)
-        else:
-            raise TimeoutError('Command queued but not observed as executed within deadline (expected %d)' % expected_idx)
+                raise TimeoutError('Command queued but not observed as executed within deadline (expected %d)' % expected_idx)
+
+        if expected_idx is None:
+            # Fallback: we didn't get an ACK; consider the command done when the current index advances beyond baseline
+            if self.verbose:
+                print('pydobot: no ACK; falling back to baseline index advance check')
+            exec_deadline = time.time() + 20.0
+            while time.time() < exec_deadline:
+                try:
+                    current_idx = self._get_queued_cmd_current_index()
+                except Exception:
+                    current_idx = None
+                if current_idx is not None and baseline_idx is not None and current_idx > baseline_idx:
+                    if self.verbose:
+                        print(f'pydobot: assumed executed (current {current_idx} > baseline {baseline_idx})')
+                    break
+                time.sleep(0.05)
+            # Do not raise on fallback exhaustion; allow next command to be issued
+            return response
 
         return response
 
