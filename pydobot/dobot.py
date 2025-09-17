@@ -13,95 +13,6 @@ from .enums.ControlValues import ControlValues
 
 class Dobot:
 
-    _SYNC = b'\xAA\xAA'
-
-    def _read_exactly(self, n, deadline):
-        """Read exactly n bytes from serial or return None on timeout."""
-        buf = bytearray()
-        while len(buf) < n:
-            if time.monotonic() > deadline:
-                return None
-            chunk = self.ser.read(n - len(buf))
-            if not chunk:
-                # keep looping until deadline
-                continue
-            buf += chunk
-        return bytes(buf)
-
-    def _read_frame_raw(self, overall_timeout=1.0):
-        """
-        Read one Dobot frame and return the raw bytes (including header and checksum),
-        or None on timeout/invalid frame.
-        Frame format:
-          [0xAA][0xAA][LEN][ID][CTRL][PAYLOAD ...][CHK]
-        CHK = (sum of all bytes except checksum) & 0xFF
-        """
-        deadline = time.monotonic() + overall_timeout
-
-        # 1) Sync on 0xAA 0xAA
-        sync = b""
-        while time.monotonic() < deadline:
-            b = self.ser.read(1)
-            if not b:
-                continue
-            sync += b
-            if len(sync) > 2:
-                sync = sync[-2:]
-            if sync == self._SYNC:
-                break
-        else:
-            if self.verbose:
-                print('pydobot: !! timeout waiting for frame header (0xAA 0xAA)')
-            return None  # header not found
-
-        # 2) Read LEN
-        len_b = self._read_exactly(1, deadline)
-        if len_b is None:
-            return None
-        length = len_b[0]
-        if length < 2:
-            if self.verbose:
-                print(f'pydobot: !! invalid length {length} (must be >= 2 for ID+CTRL)')
-            return None
-        # 3) Read BODY (ID + CTRL + PAYLOAD)
-        body = self._read_exactly(length, deadline)
-        if body is None or len(body) != length:
-            if self.verbose:
-                print('pydobot: !! timeout/short read on body')
-            return None
-        cmd_id = body[0]
-        ctrl   = body[1]
-        payload = body[2:] if length > 2 else b''
-        # 4) Read checksum
-        chk_b = self._read_exactly(1, deadline)
-        if chk_b is None:
-            if self.verbose:
-                print('pydobot: !! timeout reading checksum')
-            return None
-        checksum = chk_b[0]
-        # 5) Verify checksum. Support additive and LRC (two's complement) styles, with/without LEN.
-        sum_body      = (sum(body)) & 0xFF
-        sum_len_body  = (length + sum(body)) & 0xFF
-        valid = (
-            checksum == sum_body or
-            checksum == sum_len_body or
-            ((sum_body + checksum) & 0xFF) == 0x00 or
-            ((sum_len_body + checksum) & 0xFF) == 0x00
-        )
-        if not valid:
-            if self.verbose:
-                full = self._SYNC + bytes([length]) + body + bytes([checksum])
-                def hx(b): return ' '.join(f'{x:02X}' for x in b)
-                calc_lrc_body     = ((-sum_body) & 0xFF)
-                calc_lrc_lenbody  = ((-sum_len_body) & 0xFF)
-                print('pydobot: !! checksum mismatch')
-                print('         raw:', hx(full))
-                print(f'         len={length} id=0x{cmd_id:02X} ctrl=0x{ctrl:02X} '
-                      f'sum_body=0x{sum_body:02X} sum_len_body=0x{sum_len_body:02X} '
-                      f'lrc_body=0x{calc_lrc_body:02X} lrc_lenbody=0x{calc_lrc_lenbody:02X} got=0x{checksum:02X}')
-            return None
-        return self._SYNC + bytes([length]) + body + bytes([checksum])
-
     def __init__(self, port, verbose=False):
         threading.Thread.__init__(self)
 
@@ -112,20 +23,10 @@ class Dobot:
                                  baudrate=115200,
                                  parity=serial.PARITY_NONE,
                                  stopbits=serial.STOPBITS_ONE,
-                                 bytesize=serial.EIGHTBITS,
-                                 timeout=0.2,
-                                 write_timeout=0.5)
+                                 bytesize=serial.EIGHTBITS)
         is_open = self.ser.isOpen()
         if self.verbose:
             print('pydobot: %s open' % self.ser.name if is_open else 'failed to open serial port')
-
-        # Drain any stale bytes and give the controller a moment to settle
-        try:
-            self.ser.reset_input_buffer()
-            self.ser.reset_output_buffer()
-        except Exception:
-            pass
-        time.sleep(0.2)
 
         self._set_queued_cmd_start_exec()
         self._set_queued_cmd_clear()
@@ -173,33 +74,21 @@ class Dobot:
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
         return response
 
-    def _read_message(self, overall_timeout=3.0):
-        deadline = time.monotonic() + overall_timeout
-        while time.monotonic() < deadline:
-            # Small per-iteration timeout keeps things responsive and tolerates interleaving
-            slice_timeout = max(0.05, min(0.5, deadline - time.monotonic()))
-            raw = self._read_frame_raw(overall_timeout=slice_timeout)
-            if raw is None:
-                continue
-            msg = Message(raw)
+    def _read_message(self):
+        time.sleep(0.1)
+        b = self.ser.read_all()
+        if len(b) > 0:
+            msg = Message(b)
             if self.verbose:
                 print('pydobot: <<', msg)
             return msg
-        return None
+        return
 
     def _send_command(self, msg, wait=False):
         self.lock.acquire()
         self._send_message(msg)
-
-        # Heavier-load scenarios (JUMP_XYZ, long moves, etc.) can delay replies.
-        # Allow more time when the caller asked to wait.
-        reply_timeout = 4.0 if not wait else 15.0
-        response = self._read_message(overall_timeout=reply_timeout)
-
+        response = self._read_message()
         self.lock.release()
-
-        if response is None:
-            raise TimeoutError("No valid response from Dobot (timeout/short frame)")
 
         if not wait:
             return response
@@ -222,13 +111,10 @@ class Dobot:
         return response
 
     def _send_message(self, msg):
+        time.sleep(0.1)
         if self.verbose:
             print('pydobot: >>', msg)
         self.ser.write(msg.bytes())
-        try:
-            self.ser.flush()  # ensure bytes leave the OS buffer promptly
-        except Exception:
-            pass
 
     """
         Executes the CP Command
