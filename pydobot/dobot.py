@@ -124,10 +124,15 @@ class Dobot:
                     # need more bytes
                     break
                 frame = bytes(buf[start:start + total])
-                # validate body checksum (two's complement)
-                body_sum = sum(frame[2:2 + 2 + length]) & 0xFF
+                # validate body checksum (two's complement) over ID+CTRL+PAYLOAD only
+                # frame layout: [AA][AA][LEN][LENCHK][ID][CTRL][PARAMS...][BODYSUM]
+                body_sum = sum(frame[4:4 + length]) & 0xFF
                 body_chk = frame[-1]
                 if ((body_sum + body_chk) & 0xFF) != 0:
+                    if self.verbose:
+                        print('pydobot: !! checksum mismatch')
+                        print('         raw:', ' '.join(f'{b:02X}' for b in frame))
+                        print(f'         len={length} calc_body=0x{((-body_sum) & 0xFF):02X} got=0x{body_chk:02X}')
                     # bad body checksum; drop first header byte and resync
                     del buf[:start + 1]
                     continue
