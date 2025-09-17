@@ -82,7 +82,7 @@ class Dobot:
         return response
 
     def _read_message(self, overall_timeout=2.0):
-        """Read exactly one framed message using AA AA header and checksums.
+        """Read exactly one framed message using AA AA header and checksum (over ID+CTRL+PARAMS).
         Returns a Message or None on timeout."""
         deadline = time.time() + overall_timeout
         while time.time() < deadline:
@@ -93,13 +93,12 @@ class Dobot:
             # Try to find a complete frame in the buffer
             while True:
                 buf = self._rxbuf
-                # need at least header + len + lenchk + tail chk
-                if len(buf) < 5:
+                # Need at least header + len + checksum minimal: 2 + 1 + (ID+CTRL=2) + 1 = 6
+                if len(buf) < 6:
                     break
                 # find sync 0xAA 0xAA
                 try:
                     start = buf.index(0xAA)
-                    # ensure second 0xAA follows
                     if start + 1 >= len(buf):
                         break
                     if buf[start + 1] != 0xAA:
@@ -110,30 +109,25 @@ class Dobot:
                     # no 0xAA found; drop all
                     self._rxbuf.clear()
                     break
-                # ensure we have len and len checksum
-                if start + 4 > len(buf):
+                # ensure we have len
+                if start + 3 > len(buf):
                     break
-                length = buf[start + 2]
-                len_chk = buf[start + 3]
-                if ((length + len_chk) & 0xFF) != 0:
-                    # bad len checksum; drop first byte and resync
-                    del buf[:start + 1]
-                    continue
-                total = 2 + 2 + length + 1  # hdr(2) + len+lenchk(2) + body(length) + bodychk(1)
+                length = buf[start + 2]  # body length: ID+CTRL+PARAMS
+                total = 2 + 1 + length + 1  # hdr(2) + len(1) + body(length) + checksum(1)
                 if start + total > len(buf):
                     # need more bytes
                     break
                 frame = bytes(buf[start:start + total])
-                # validate body checksum (two's complement) over ID+CTRL+PAYLOAD only
-                # frame layout: [AA][AA][LEN][LENCHK][ID][CTRL][PARAMS...][BODYSUM]
-                body_sum = sum(frame[4:4 + length]) & 0xFF
-                body_chk = frame[-1]
-                if ((body_sum + body_chk) & 0xFF) != 0:
+                # frame layout: [AA][AA][LEN][ID][CTRL][PARAMS...][CHK]
+                body = frame[3:3 + length]   # ID+CTRL+PARAMS (exactly 'length' bytes)
+                chk = frame[-1]
+                # checksum is two's complement over body only
+                if (((sum(body) & 0xFF) + chk) & 0xFF) != 0:
                     if self.verbose:
                         print('pydobot: !! checksum mismatch')
                         print('         raw:', ' '.join(f'{b:02X}' for b in frame))
-                        print(f'         len={length} calc_body=0x{((-body_sum) & 0xFF):02X} got=0x{body_chk:02X}')
-                    # bad body checksum; drop first header byte and resync
+                        print(f'         len={length} calc=0x{((-sum(body)) & 0xFF):02X} got=0x{chk:02X}')
+                    # bad checksum; drop first header byte and resync
                     del buf[:start + 1]
                     continue
                 # we have a good frame; remove it from buffer and parse
