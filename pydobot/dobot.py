@@ -13,13 +13,34 @@ from .enums.ControlValues import ControlValues
 
 class Dobot:
 
-    def __init__(self, port, verbose=False):
+    def __init__(self, port, verbose=False, queue_clear_every: int = 0):
         threading.Thread.__init__(self)
 
         self._on = True
+        # Queue hygiene: clear the device's queued command buffer every N completed queued commands.
+        # 0 disables this behavior. See Dobot protocol (Queued Cmd Clear/Start/Stop) and pydobot methods below.
+        self._queue_clear_every = int(queue_clear_every) if queue_clear_every is not None else 0
+        self._queued_since_clear = 0
         self.verbose = verbose
         self.lock = threading.Lock()
         self.ser = serial.Serial(
+    def set_queue_clear_every(self, n: int):
+        """Enable/disable periodic queue clear: set N>0 to clear every N completed queued commands; 0 disables."""
+        self._queue_clear_every = max(0, int(n))
+        if self.verbose:
+            print(f"pydobot: queue_clear_every set to {self._queue_clear_every}")
+
+    def _queue_hygiene_clear_and_restart(self):
+        """Perform a safe queue hygiene cycle: stop -> clear -> start (per protocol)."""
+        try:
+            if self.verbose:
+                print("pydobot: queue hygiene — stop/clear/start")
+            self._set_queued_cmd_stop_exec()
+            self._set_queued_cmd_clear()
+            self._set_queued_cmd_start_exec()
+        except Exception as e:
+            if self.verbose:
+                print(f"pydobot: queue hygiene failed: {e}")
             port,
             baudrate=115200,
             parity=serial.PARITY_NONE,
@@ -92,6 +113,16 @@ class Dobot:
                             j3:%03.1f \
                             j4:%03.1f" %
                   (self.x, self.y, self.z, self.r, self.j1, self.j2, self.j3, self.j4))
+        else:
+            raise TimeoutError('Command queued but not observed as executed within deadline (expected %d)' % expected_idx)
+
+        # At this point, the queued command has completed.
+        if msg.ctrl == ControlValues.THREE:
+            self._queued_since_clear += 1
+            if self._queue_clear_every and (self._queued_since_clear % self._queue_clear_every == 0):
+                # Use documented pydobot wrappers that match the official Dobot protocol.
+                self._queue_hygiene_clear_and_restart()
+
         return response
 
     def _read_message(self, overall_timeout=2.0):
