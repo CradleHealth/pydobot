@@ -147,10 +147,11 @@ class Dobot:
         self.lock.acquire()
         self._send_message(msg)
         # Wait specifically for the ACK with the same ID, ignore unrelated frames
-        deadline = time.time() + 3.0
+        # Some controllers (e.g., Magician Lite) can delay the ACK slightly under load.
+        deadline = time.time() + 6.0  # was 3.0
         response = None
         while time.time() < deadline:
-            resp = self._read_message(overall_timeout=0.5)
+            resp = self._read_message(overall_timeout=1.0)  # was 0.5
             if resp is None:
                 continue
             if resp.id == msg.id:
