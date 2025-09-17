@@ -172,9 +172,32 @@ class Dobot:
         self.lock.release()
 
         if response is None:
-            if msg.ctrl == ControlValues.THREE:  # queued command: proceed without ACK (fire-and-forget)
+            # Treat PTP and other queued-style commands as fire-and-forget when ACK is missing.
+            queued_like = False
+            try:
+                queued_like = (
+                    getattr(msg, 'ctrl', None) in (ControlValues.THREE, 3) or
+                    getattr(msg, 'id', None) in (
+                        CommunicationProtocolIDs.SET_PTP_CMD,
+                        CommunicationProtocolIDs.SET_GET_PTP_JOINT_PARAMS,
+                        CommunicationProtocolIDs.SET_GET_PTP_COORDINATE_PARAMS,
+                        CommunicationProtocolIDs.SET_GET_PTP_JUMP_PARAMS,
+                        CommunicationProtocolIDs.SET_GET_PTP_COMMON_PARAMS,
+                        CommunicationProtocolIDs.SET_CP_CMD,
+                        CommunicationProtocolIDs.SET_GET_END_EFFECTOR_GRIPPER,
+                        CommunicationProtocolIDs.SET_GET_END_EFFECTOR_SUCTION_CUP,
+                        CommunicationProtocolIDs.SET_QUEUED_CMD_START_EXEC,
+                        CommunicationProtocolIDs.SET_QUEUED_CMD_STOP_EXEC,
+                        CommunicationProtocolIDs.SET_QUEUED_CMD_CLEAR,
+                        CommunicationProtocolIDs.SET_GET_EIO
+                    )
+                )
+            except Exception:
+                queued_like = False
+            if queued_like:
                 if self.verbose:
-                    print(f'pydobot: ! no ACK for id=0x{msg.id:02X}; proceeding (queued)')
+                    print(f"pydobot: ! no ACK for id=0x{getattr(msg,'id',0):02X}; proceeding (queued-like)")
+                # response stays None; fallback path or immediate return will handle the rest
             else:
                 raise TimeoutError(f'No ACK received for command id=0x{msg.id:02X} within timeout')
 
