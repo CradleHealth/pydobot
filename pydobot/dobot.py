@@ -24,6 +24,14 @@ class Dobot:
         self.verbose = verbose
         self.lock = threading.Lock()
         self.ser = serial.Serial(
+            port,
+            baudrate=115200,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            bytesize=serial.EIGHTBITS,
+            timeout=0.2,          # short, slice-based reads
+            write_timeout=0.5     # avoid blocking on write
+        )
     def set_queue_clear_every(self, n: int):
         """Enable/disable periodic queue clear: set N>0 to clear every N completed queued commands; 0 disables."""
         self._queue_clear_every = max(0, int(n))
@@ -41,14 +49,6 @@ class Dobot:
         except Exception as e:
             if self.verbose:
                 print(f"pydobot: queue hygiene failed: {e}")
-            port,
-            baudrate=115200,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            bytesize=serial.EIGHTBITS,
-            timeout=0.2,          # short, slice-based reads
-            write_timeout=0.5     # avoid blocking on write
-        )
         # streaming receive buffer for robust frame assembly
         self._rxbuf = bytearray()
         is_open = self.ser.isOpen()
